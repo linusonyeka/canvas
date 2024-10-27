@@ -21,10 +21,11 @@
 (define-constant err-not-admin (err u108))
 (define-constant err-already-admin (err u109))
 (define-constant err-cannot-remove-owner (err u110))
+(define-constant err-invalid-price-range (err u111))
 
-;; Price constraints
-(define-constant min-price u1000)
-(define-constant max-price u100000000000)
+;; Price constraints as variables instead of constants
+(define-data-var min-price uint u1000)
+(define-data-var max-price uint u100000000000)
 (define-constant max-fee u100)
 
 ;; Data variables
@@ -97,6 +98,17 @@
     })
 )
 
+(define-private (log-price-range-updated (old-min uint) (old-max uint) (new-min uint) (new-max uint))
+    (print {
+        event: "price-range-updated",
+        old-min-price: old-min,
+        old-max-price: old-max,
+        new-min-price: new-min,
+        new-max-price: new-max,
+        updated-by: tx-sender
+    })
+)
+
 ;; Admin management functions
 (define-read-only (is-admin (address principal))
     (default-to false (map-get? admins address))
@@ -127,6 +139,34 @@
     )
 )
 
+;; Price range management functions
+(define-read-only (get-price-range)
+    (ok {
+        min-price: (var-get min-price),
+        max-price: (var-get max-price)
+    })
+)
+
+(define-public (set-price-range (new-min uint) (new-max uint))
+    (begin
+        (try! (assert-is-admin))
+        ;; Ensure new min is less than new max
+        (asserts! (< new-min new-max) err-invalid-price-range)
+        ;; Store old values for event logging
+        (let (
+            (old-min (var-get min-price))
+            (old-max (var-get max-price))
+        )
+            ;; Update values
+            (var-set min-price new-min)
+            (var-set max-price new-max)
+            ;; Log the changes
+            (log-price-range-updated old-min old-max new-min new-max)
+            (ok true)
+        )
+    )
+)
+
 ;; Read-only functions
 (define-read-only (get-listing (nft-contract principal) (token-id uint))
     (map-get? listings { nft-contract: nft-contract, token-id: token-id })
@@ -137,7 +177,10 @@
 )
 
 (define-read-only (is-valid-price (price uint))
-    (and (>= price min-price) (<= price max-price))
+    (and 
+        (>= price (var-get min-price)) 
+        (<= price (var-get max-price))
+    )
 )
 
 ;; Private functions
@@ -212,7 +255,7 @@
     )
 )
 
-;; Admin functions (now requires admin access)
+;; Admin functions
 (define-public (set-platform-fee (new-fee uint))
     (begin
         (try! (assert-is-admin))
