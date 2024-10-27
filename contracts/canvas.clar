@@ -31,6 +31,47 @@
     { price: uint, seller: principal }
 )
 
+;; Event logging functions
+(define-private (log-listing-created (nft-contract principal) (token-id uint) (price uint) (seller principal))
+    (print {
+        event: "listing-created",
+        nft-contract: nft-contract,
+        token-id: token-id,
+        price: price,
+        seller: seller
+    })
+)
+
+(define-private (log-listing-removed (nft-contract principal) (token-id uint) (seller principal))
+    (print {
+        event: "listing-removed",
+        nft-contract: nft-contract,
+        token-id: token-id,
+        seller: seller
+    })
+)
+
+(define-private (log-nft-purchased (nft-contract principal) (token-id uint) (price uint) (seller principal) (buyer principal) (fee uint))
+    (print {
+        event: "nft-purchased",
+        nft-contract: nft-contract,
+        token-id: token-id,
+        price: price,
+        seller: seller,
+        buyer: buyer,
+        platform-fee: fee
+    })
+)
+
+(define-private (log-fee-updated (old-fee uint) (new-fee uint))
+    (print {
+        event: "fee-updated",
+        old-fee: old-fee,
+        new-fee: new-fee,
+        updated-by: tx-sender
+    })
+)
+
 ;; Read-only functions
 (define-read-only (get-listing (nft-contract principal) (token-id uint))
     (map-get? listings { nft-contract: nft-contract, token-id: token-id })
@@ -67,6 +108,10 @@
             (asserts! (is-eq tx-sender owner) err-not-owner)
             (asserts! (is-none (get-listing (contract-of nft-contract) token-id)) err-already-listed)
             (try! (contract-call? nft-contract transfer token-id tx-sender (as-contract tx-sender)))
+            
+            ;; Log the listing creation event
+            (log-listing-created (contract-of nft-contract) token-id price tx-sender)
+            
             (ok (map-set listings
                 { nft-contract: (contract-of nft-contract), token-id: token-id }
                 { price: price, seller: tx-sender }
@@ -85,6 +130,10 @@
         )
             (asserts! (is-eq (get seller listing) tx-sender) err-not-owner)
             (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
+            
+            ;; Log the listing removal event
+            (log-listing-removed (contract-of nft-contract) token-id tx-sender)
+            
             (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
         )
     )
@@ -109,6 +158,10 @@
             (try! (stx-transfer? fee tx-sender contract-owner))
             ;; Transfer NFT to buyer
             (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
+            
+            ;; Log the purchase event
+            (log-nft-purchased (contract-of nft-contract) token-id price seller tx-sender fee)
+            
             (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
         )
     )
@@ -119,6 +172,10 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-not-owner)
         (asserts! (<= new-fee max-fee) err-invalid-fee)
+        
+        ;; Log the fee update event
+        (log-fee-updated (var-get platform-fee) new-fee)
+        
         (ok (var-set platform-fee new-fee))
     )
 )
