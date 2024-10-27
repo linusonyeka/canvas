@@ -1,77 +1,95 @@
-;; NFT Marketplace - Canvas
-;; A decentralized marketplace for trading NFTs on Stacks blockchain
+;; Define SIP-009 NFT trait
+(define-trait nft-trait
+    (
+        ;; Last token ID, limited to uint range
+        (get-last-token-id () (response uint uint))
+        
+        ;; URI for token metadata
+        (get-token-uri (uint) (response (optional (string-ascii 256)) uint))
+        
+        ;; Owner of a token
+        (get-owner (uint) (response (optional principal) uint))
+        
+        ;; Transfer token
+        (transfer (uint principal principal) (response bool uint))
+    )
+)
 
-(define-data-var contract-owner principal tx-sender)
+;; NFT Marketplace Contract
+;; Allows users to list, buy, and delist NFTs
+
+;; Define constants
+(define-constant contract-owner tx-sender)
+(define-constant err-not-owner (err u100))
+(define-constant err-not-listed (err u101))
+(define-constant err-wrong-price (err u102))
+(define-constant err-already-listed (err u103))
+(define-constant err-token-not-found (err u104))
+
+;; Define data variables
+(define-data-var platform-fee uint u25) ;; 2.5% fee
 (define-map listings 
-    { nft-id: uint, seller: principal } 
-    { price: uint, is-active: bool })
-(define-map sales
-    { nft-id: uint }
-    { buyer: principal, price: uint, timestamp: uint })
+    { nft-contract: principal, token-id: uint }
+    { price: uint, seller: principal }
+)
 
-;; Error constants
-(define-constant ERR-NOT-AUTHORIZED (err u100))
-(define-constant ERR-LISTING-NOT-FOUND (err u101))
-(define-constant ERR-LISTING-NOT-ACTIVE (err u102))
-(define-constant ERR-INSUFFICIENT-FUNDS (err u103))
+;; Read-only functions
+(define-read-only (get-listing (nft-contract principal) (token-id uint))
+    (map-get? listings { nft-contract: nft-contract, token-id: token-id })
+)
 
-;; List an NFT for sale
-(define-public (list-nft (nft-id uint) (price uint))
-    (let ((seller tx-sender))
-        (asserts! (is-eq (nft-get-owner? nft-id) (some seller)) ERR-NOT-AUTHORIZED)
-        (map-set listings 
-            { nft-id: nft-id, seller: seller }
-            { price: price, is-active: true })
-        (ok true)))
+(define-read-only (get-platform-fee)
+    (var-get platform-fee)
+)
 
-;; Cancel listing
-(define-public (cancel-listing (nft-id uint))
-    (let ((listing (map-get? listings { nft-id: nft-id, seller: tx-sender })))
-        (asserts! (is-some listing) ERR-LISTING-NOT-FOUND)
-        (map-set listings 
-            { nft-id: nft-id, seller: tx-sender }
-            { price: u0, is-active: false })
-        (ok true)))
+;; Public functions
+(define-public (list-nft (nft-contract <nft-trait>) (token-id uint) (price uint))
+    (let (
+        (owner-response (try! (contract-call? nft-contract get-owner token-id)))
+        (owner (unwrap! owner-response err-token-not-found))
+    )
+        (asserts! (is-eq tx-sender owner) err-not-owner)
+        (asserts! (is-none (get-listing (contract-of nft-contract) token-id)) err-already-listed)
+        (try! (contract-call? nft-contract transfer token-id tx-sender (as-contract tx-sender)))
+        (ok (map-set listings
+            { nft-contract: (contract-of nft-contract), token-id: token-id }
+            { price: price, seller: tx-sender }
+        ))
+    )
+)
 
-;; Purchase NFT
-(define-public (purchase-nft (nft-id uint))
-    (let ((listing (map-get? listings { nft-id: nft-id, seller: tx-sender }))
-          (buyer tx-sender))
-        (match listing
-            l (begin
-                (asserts! (get is-active l) ERR-LISTING-NOT-ACTIVE)
-                (asserts! (>= (stx-get-balance buyer) (get price l)) ERR-INSUFFICIENT-FUNDS)
-                ;; Transfer STX to seller
-                (try! (stx-transfer? (get price l) buyer (get seller listing)))
-                ;; Transfer NFT to buyer
-                (try! (nft-transfer? nft-id (get seller listing) buyer))
-                ;; Record sale
-                (map-set sales 
-                    { nft-id: nft-id }
-                    { buyer: buyer, 
-                      price: (get price l), 
-                      timestamp: block-height })
-                ;; Deactivate listing
-                (map-set listings 
-                    { nft-id: nft-id, seller: (get seller listing) }
-                    { price: u0, is-active: false })
-                (ok true)))
-            ERR-LISTING-NOT-FOUND))
+(define-public (unlist-nft (nft-contract <nft-trait>) (token-id uint))
+    (let (
+        (listing (unwrap! (get-listing (contract-of nft-contract) token-id) err-not-listed))
+    )
+        (asserts! (is-eq (get seller listing) tx-sender) err-not-owner)
+        (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
+        (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
+    )
+)
 
-;; Get listing details
-(define-read-only (get-listing (nft-id uint) (seller principal))
-    (map-get? listings { nft-id: nft-id, seller: seller }))
+(define-public (buy-nft (nft-contract <nft-trait>) (token-id uint) (price uint))
+    (let (
+        (listing (unwrap! (get-listing (contract-of nft-contract) token-id) err-not-listed))
+        (seller (get seller listing))
+        (list-price (get price listing))
+        (fee (/ (* price (var-get platform-fee)) u1000))
+    )
+        (asserts! (is-eq price list-price) err-wrong-price)
+        ;; Transfer STX payment to seller
+        (try! (stx-transfer? (- price fee) tx-sender seller))
+        ;; Transfer platform fee
+        (try! (stx-transfer? fee tx-sender contract-owner))
+        ;; Transfer NFT to buyer
+        (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
+        (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
+    )
+)
 
-;; Get sale details
-(define-read-only (get-sale (nft-id uint))
-    (map-get? sales { nft-id: nft-id }))
-
-;; Update listing price
-(define-public (update-listing-price (nft-id uint) (new-price uint))
-    (let ((listing (map-get? listings { nft-id: nft-id, seller: tx-sender })))
-        (asserts! (is-some listing) ERR-LISTING-NOT-FOUND)
-        (asserts! (get is-active listing) ERR-LISTING-NOT-ACTIVE)
-        (map-set listings 
-            { nft-id: nft-id, seller: tx-sender }
-            { price: new-price, is-active: true })
-        (ok true)))
+;; Admin functions
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-owner)
+        (ok (var-set platform-fee new-fee))
+    )
+)
