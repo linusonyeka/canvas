@@ -18,18 +18,27 @@
 (define-constant err-invalid-price (err u105))
 (define-constant err-invalid-fee (err u106))
 (define-constant err-invalid-token (err u107))
+(define-constant err-not-admin (err u108))
+(define-constant err-already-admin (err u109))
+(define-constant err-cannot-remove-owner (err u110))
 
 ;; Price constraints
-(define-constant min-price u1000) ;; Minimum price in uSTX (micro STX)
-(define-constant max-price u100000000000) ;; Maximum price in uSTX
-(define-constant max-fee u100) ;; Maximum platform fee (10%)
+(define-constant min-price u1000)
+(define-constant max-price u100000000000)
+(define-constant max-fee u100)
 
 ;; Data variables
-(define-data-var platform-fee uint u25) ;; 2.5% fee
+(define-data-var platform-fee uint u25)
 (define-map listings 
     { nft-contract: principal, token-id: uint }
     { price: uint, seller: principal }
 )
+
+;; Admin management
+(define-map admins principal bool)
+
+;; Initialize contract owner as first admin
+(map-set admins contract-owner true)
 
 ;; Event logging functions
 (define-private (log-listing-created (nft-contract principal) (token-id uint) (price uint) (seller principal))
@@ -72,6 +81,52 @@
     })
 )
 
+(define-private (log-admin-added (new-admin principal))
+    (print {
+        event: "admin-added",
+        admin: new-admin,
+        added-by: tx-sender
+    })
+)
+
+(define-private (log-admin-removed (removed-admin principal))
+    (print {
+        event: "admin-removed",
+        admin: removed-admin,
+        removed-by: tx-sender
+    })
+)
+
+;; Admin management functions
+(define-read-only (is-admin (address principal))
+    (default-to false (map-get? admins address))
+)
+
+(define-private (assert-is-admin)
+    (ok (asserts! (is-admin tx-sender) err-not-admin))
+)
+
+(define-public (add-admin (new-admin principal))
+    (begin
+        (try! (assert-is-admin))
+        (asserts! (not (is-admin new-admin)) err-already-admin)
+        (map-set admins new-admin true)
+        (log-admin-added new-admin)
+        (ok true)
+    )
+)
+
+(define-public (remove-admin (admin-to-remove principal))
+    (begin
+        (try! (assert-is-admin))
+        (asserts! (not (is-eq admin-to-remove contract-owner)) err-cannot-remove-owner)
+        (asserts! (is-admin admin-to-remove) err-not-admin)
+        (map-delete admins admin-to-remove)
+        (log-admin-removed admin-to-remove)
+        (ok true)
+    )
+)
+
 ;; Read-only functions
 (define-read-only (get-listing (nft-contract principal) (token-id uint))
     (map-get? listings { nft-contract: nft-contract, token-id: token-id })
@@ -96,9 +151,7 @@
 ;; Public functions
 (define-public (list-nft (nft-contract <nft-trait>) (token-id uint) (price uint))
     (begin
-        ;; Check price validity
         (asserts! (is-valid-price price) err-invalid-price)
-        ;; Check token validity
         (try! (check-nft-validity nft-contract token-id))
         
         (let (
@@ -109,7 +162,6 @@
             (asserts! (is-none (get-listing (contract-of nft-contract) token-id)) err-already-listed)
             (try! (contract-call? nft-contract transfer token-id tx-sender (as-contract tx-sender)))
             
-            ;; Log the listing creation event
             (log-listing-created (contract-of nft-contract) token-id price tx-sender)
             
             (ok (map-set listings
@@ -122,7 +174,6 @@
 
 (define-public (unlist-nft (nft-contract <nft-trait>) (token-id uint))
     (begin
-        ;; Check token validity
         (try! (check-nft-validity nft-contract token-id))
         
         (let (
@@ -131,7 +182,6 @@
             (asserts! (is-eq (get seller listing) tx-sender) err-not-owner)
             (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
             
-            ;; Log the listing removal event
             (log-listing-removed (contract-of nft-contract) token-id tx-sender)
             
             (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
@@ -141,7 +191,6 @@
 
 (define-public (buy-nft (nft-contract <nft-trait>) (token-id uint) (price uint))
     (begin
-        ;; Check token validity
         (try! (check-nft-validity nft-contract token-id))
         
         (let (
@@ -152,14 +201,10 @@
         )
             (asserts! (is-eq price list-price) err-wrong-price)
             (asserts! (is-valid-price price) err-invalid-price)
-            ;; Transfer STX payment to seller
             (try! (stx-transfer? (- price fee) tx-sender seller))
-            ;; Transfer platform fee
             (try! (stx-transfer? fee tx-sender contract-owner))
-            ;; Transfer NFT to buyer
             (try! (as-contract (contract-call? nft-contract transfer token-id (as-contract tx-sender) tx-sender)))
             
-            ;; Log the purchase event
             (log-nft-purchased (contract-of nft-contract) token-id price seller tx-sender fee)
             
             (ok (map-delete listings { nft-contract: (contract-of nft-contract), token-id: token-id }))
@@ -167,13 +212,12 @@
     )
 )
 
-;; Admin functions
+;; Admin functions (now requires admin access)
 (define-public (set-platform-fee (new-fee uint))
     (begin
-        (asserts! (is-eq tx-sender contract-owner) err-not-owner)
+        (try! (assert-is-admin))
         (asserts! (<= new-fee max-fee) err-invalid-fee)
         
-        ;; Log the fee update event
         (log-fee-updated (var-get platform-fee) new-fee)
         
         (ok (var-set platform-fee new-fee))
